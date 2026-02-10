@@ -1,162 +1,208 @@
-# 自宅プライベートクラウド構築（1台完結・教材用）
+# Proxmox + Terraform で自宅プライベートクラウド構築（Phase1確実成功）
 
-本リポジトリは、**自宅の物理マシン1台**を使用して  
-「プライベートクラウド風の構成」を構築・学習するための  
-**教材兼 構築手順管理リポジトリ**です。
-
-24時間稼働や冗長構成は前提とせず、  
-**学習時のみ起動する環境**で、  
-企業オンプレミスやプライベートクラウドの**設計思想を理解する**ことを目的としています。
+目的: Proxmox上でCloud-Initテンプレを用意し、TerraformでVMを量産できる状態にする。  
+まずは「Terraformで1台VM作成 → SSH接続成功」を最短で実現します。
 
 ---
 
-## 🎯 目的
+## TL;DR（最短手順）
 
-- 物理マシン1台で「クラウド的な構成」を再現する
-- ネットワーク分離・役割分離を体験する
-- Kubernetes を中心とした現場寄り構成を学ぶ
-- 構築内容を **Git管理**し、再現・教材化できる形にする
-
----
-
-## 🧩 前提条件・制約
-
-- 物理マシン：**1台**
-- 稼働：**学習時のみ**
-- 物理スイッチ：**使用しない**
-- ネットワーク分離：**Proxmox 内の仮想ブリッジで実現**
-- VLAN：**使用しない（教材として不要）**
+1. ProxmoxでAPI Tokenを作る  
+2. Ubuntu 24.04 cloud imageからCloud-Initテンプレを作る（VMID 9000）  
+3. `terraform/` に移動して `terraform init && terraform apply`  
+4. Proxmox UIでDHCP割当IPを確認してSSH接続
 
 ---
 
-## 🏗 採用技術スタック
+## 前提
 
-| レイヤ | 技術 |
-|------|------|
-| 仮想化基盤 | Proxmox VE |
-| OS | Ubuntu Server |
-| コンテナ | Docker / containerd |
-| Kubernetes | k3s または kubeadm |
-| Git | Gitea（self-hosted） |
-| Registry | registry:2 / Harbor（任意） |
-| 監視（後半） | Prometheus / Grafana |
-| ログ（任意） | Loki |
+- Proxmox VE: `https://192.168.1.50:8006`
+- ノード名: `pve`
+- ストレージ: `local`（イメージ置き場）、`local-lvm`（VMディスク）
+- ブリッジ: `vmbr0`
+- OS: Ubuntu Server 24.04 LTS cloud image
+- VMテンプレID: `9000`（衝突したら変更可）
 
 ---
 
-## 🌐 ネットワーク設計（重要）
+## 1. Proxmox準備（API Token）
 
-### 仮想ブリッジ構成（Proxmox）
+### 1-1. ユーザー作成
+- `Datacenter` → `Permissions` → `Users` → `Add`
+- User: `terraform`
+- Realm: `pve`
 
-| Bridge | 用途 | 説明 |
-|------|------|------|
-| vmbr0 | 管理・外部通信 | Proxmox管理GUI / VMの外部通信 |
-| vmbr1 | 内部（閉域） | VM間の内部通信専用 |
+### 1-2. 役割（Role）作成（最小権限の例）
+- `Datacenter` → `Permissions` → `Roles` → `Create`
+- Role name: `TerraformRole`
+- 付与する権限（最低限の目安）
+  - `Datastore.Audit`
+  - `Datastore.AllocateSpace`
+  - `Datastore.AllocateTemplate`
+  - `VM.Audit`
+  - `VM.Allocate`
+  - `VM.Clone`
+  - `VM.Config.CPU`
+  - `VM.Config.Memory`
+  - `VM.Config.Disk`
+  - `VM.Config.Network`
+  - `VM.Config.Cloudinit`
+  - `VM.Config.Options`
+  - `VM.PowerMgmt`
+  - `Sys.Audit`
 
-- `vmbr1` は **物理NICに接続しない**
-- 物理スイッチなしでも **論理的なネットワーク分離**を実現
-- 教材として「管理NW / プライベートNW」の考え方を学ぶ
+※ もし権限エラーが出たら、まずは一時的に `PVEVMAdmin` でもOK（後で絞る）。
 
----
+### 1-3. ACL付与
+- `Datacenter` → `Permissions` → `Add` → `User Permission`
+- Path: `/`
+- User: `terraform@pve`
+- Role: `TerraformRole`
+- Propagate: ON
 
-## 🖥 VM構成（最小・教材向け）
+### 1-4. API Token作成
+- `Datacenter` → `Permissions` → `API Tokens` → `Add`
+- User: `terraform@pve`
+- Token ID: `tf`
+- Privilege Separation: **OFF**（User権限を使う）
 
-### 1. infra-mgmt（管理用VM）
-- OS：Ubuntu Server
-- 役割：
-  - kubectl / helm
-  - Git クライアント
-  - Terraform / Ansible（将来導入）
-- Network：
-  - vmbr0（必須）
-  - vmbr1（任意）
-
-👉 **構築・運用の司令塔**
-
----
-
-### 2. k8s-cp（Kubernetes Control Plane）
-- OS：Ubuntu Server
-- 役割：
-  - Kubernetes Control Plane
-- Network：
-  - vmbr1（必須）
-  - vmbr0（任意）
-
-👉 **Control Plane の役割理解用**
-
----
-
-### 3. k8s-worker（Kubernetes Worker）
-- OS：Ubuntu Server
-- 役割：
-  - Kubernetes Worker Node
-- Network：
-  - vmbr1（必須）
-  - vmbr0（任意）
-
-👉 **Pod配置・スケジューリング学習用**
+生成された **Token Secret** を保存しておく。
 
 ---
 
-### 4. shared-svcs（共通サービスVM）
-- OS：Ubuntu Server
-- 役割：
-  - Gitea（Git）
-  - Container Registry
-  - 監視・ログ（後半教材）
-- Network：
-  - vmbr1（必須）
-  - vmbr0（任意）
+## 2. Cloud-Initテンプレ作成（Ubuntu 24.04）
 
-👉 **Kubernetes 外部サービス連携の実践**
+### 2-1. CLIで作る（推奨）
+Proxmoxノード（`pve`）のShellで実行:
 
----
+```bash
+cd /var/lib/vz/template/iso
+wget https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
 
-## 📘 この構成で扱う学習スコープ
+qm create 9000 --name ubuntu-2404-cloudinit --memory 1024 --cores 1 --net0 virtio,bridge=vmbr0
+qm importdisk 9000 /var/lib/vz/template/iso/noble-server-cloudimg-amd64.img local-lvm
+qm set 9000 --scsihw virtio-scsi-pci --scsi0 local-lvm:vm-9000-disk-0
+qm set 9000 --ide2 local-lvm:cloudinit
+qm set 9000 --boot c --bootdisk scsi0
+qm set 9000 --serial0 socket --vga serial0
+qm set 9000 --agent enabled=1
+qm template 9000
+```
 
-### Kubernetes 基礎
-- Pod / Deployment / Service
-- Namespace
-- ConfigMap / Secret
-
-### 実務寄り
-- InitContainer
-- Ingress / Gateway API
-- Resource requests / limits
-- PVC（段階的に）
-
-### 運用
-- GitOps（Argo CD）
-- 監視（Prometheus / Grafana）
-- ログ収集（Loki）
+### 2-2. GUIで作る（代替）
+1. `local` → `ISO Images` に cloud image をアップロード  
+2. VMを作成（VMID 9000）  
+3. Diskをcloud imageから作成して接続  
+4. Cloud-Init Driveを追加  
+5. Boot順序をDiskに  
+6. `Convert to Template`
 
 ---
 
-## 🗂 Git管理方針
+## 3. Terraform実行（Phase1）
 
-### 管理対象
-- VM構成・役割設計
-- 各VMのセットアップ手順
-- Kubernetes マニフェスト
-- 共通サービスの構築手順
-- 教材用ドキュメント
+### 3-1. 事前準備
+```bash
+cd terraform
+cp terraform.tfvars.example terraform.tfvars
+```
 
-### 管理しないもの
-- 秘密情報（鍵・トークン）
-- 実データ（DB・ログ）
-- 個人環境依存の値  
-  → `example` / `sample` としてテンプレ化する
+`terraform.tfvars` に以下を記入:
+- `proxmox_api_token_id`
+- `proxmox_api_token_secret`
+- `ssh_public_key_path`
 
----
-
-## ▶ 運用方針（学習前提）
-
-- 原則：**必要なときだけ起動**
-- 節目で Proxmox Snapshot を取得
-- 意図的に壊して直す演習を想定
+### 3-2. apply
+```bash
+terraform init
+terraform apply
+```
 
 ---
 
-## 📂 リポジトリ構成（予定）
+## 4. VM起動確認
 
+- Proxmox UIでVMを確認
+- DHCPで付与されたIPを確認
+- SSH:
+```bash
+ssh -i ~/.ssh/id_rsa ubuntu@<VM_IP>
+```
+
+---
+
+## よくあるエラー
+
+- **権限不足**  
+  `permission denied` が出る場合は Role/ACLを再確認
+
+- **ストレージ名不一致**  
+  `local-lvm` / `local` が環境と一致しているか
+
+- **ブリッジ名不一致**  
+  `vmbr0` 以外なら変数で修正
+
+- **テンプレVMID不一致**  
+  `vm_template_id` を修正
+
+- **cloud-initが動かない**  
+  テンプレが `Cloud-Init` Drive を持っているか
+
+- **SSH鍵が反映されない**  
+  パスが正しいか / 改行が混入していないか
+
+---
+
+## Phase2以降（複数VM展開）
+
+`main.tf` の `count`/`for_each`化で対応可能。  
+差分は以下のとおりです。
+
+### Phase2: 複数VM化の手順
+
+1) `terraform.tfvars` に `vm_map` を定義（空ならPhase1の単体VM）
+
+```hcl
+vm_map = {
+  vm-ubuntu01 = {
+    vm_id        = 101
+    name         = "vm-ubuntu01"
+    cpu_cores    = 2
+    memory_mb    = 2048
+    disk_gb      = 20
+    tags         = ["terraform", "lab"]
+    ipv4_address = "dhcp"
+  }
+  vm-ubuntu02 = {
+    vm_id        = 102
+    name         = "vm-ubuntu02"
+    cpu_cores    = 2
+    memory_mb    = 2048
+    disk_gb      = 20
+    tags         = ["terraform", "lab"]
+    ipv4_address = "dhcp"
+  }
+  vm-ubuntu03 = {
+    vm_id        = 103
+    name         = "vm-ubuntu03"
+    cpu_cores    = 2
+    memory_mb    = 2048
+    disk_gb      = 20
+    tags         = ["terraform", "lab"]
+    ipv4_address = "dhcp"
+  }
+}
+```
+
+2) 固定IPにする場合は `ipv4_address` / `ipv4_gateway` を指定
+
+```hcl
+ipv4_address = "192.168.1.110/24"
+ipv4_gateway = "192.168.1.1"
+```
+
+3) そのまま `terraform apply`
+
+```bash
+terraform apply
+```

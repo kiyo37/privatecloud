@@ -1,0 +1,30 @@
+proxmox_api_token_id     = "terraform@pve!tf"
+proxmox_api_token_secret = "REPLACE_ME"
+
+ssh_public_key_path = "C:/Users/yourname/.ssh/id_rsa.pub"
+
+# 固定IPにする場合（例）
+# vm_ipv4_address = "192.168.1.110/24"
+# vm_ipv4_gateway = "192.168.1.1"
+
+# 複数VMにする場合（Phase2）
+# vm_map = {
+#   vm-ubuntu01 = {
+#     vm_id        = 101
+#     name         = "vm-ubuntu01"
+#     cpu_cores    = 2
+#     memory_mb    = 2048
+#     disk_gb      = 20
+#     tags         = ["terraform", "lab"]
+#     ipv4_address = "dhcp"
+#   }
+#   vm-ubuntu02 = {
+#     vm_id        = 102
+#     name         = "vm-ubuntu02"
+#     cpu_cores    = 2
+#     memory_mb    = 2048
+#     disk_gb      = 20
+#     tags         = ["terraform", "lab"]
+#     ipv4_address = "dhcp"
+#   }
+# }
